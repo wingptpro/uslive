@@ -1,0 +1,153 @@
+name: Generate Prime Video Playlist (Sports)
+
+on:
+  schedule:
+    - cron: "17 */3 * * *" # Otomatis berjalan setiap 3 jam
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Kosongkan cache key sebelum generate"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: prime-generator-sports
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+
+    steps:
+      # 1. Checkout repo publik ini (tempat menyimpan playlist m3u)
+      - name: Checkout Repo Publik
+        uses: actions/checkout@v4
+        with:
+          path: public-playlist
+
+      # 2. Checkout script rahasia dari repo private
+      - name: Checkout Script dari Repo Private
+        uses: actions/checkout@v4
+        with:
+          repository: "wingptpro/edu"
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: generator
+
+      # 3. Setup Node.js 20
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # 4. Install dependencies di folder generator
+      - name: Install dependencies
+        working-directory: generator
+        run: npm install --omit=dev
+
+      # 5. Pulihkan file kredensial dari Secrets ke dalam folder generator
+      - name: Restore credentials dari Secrets
+        working-directory: generator
+        env:
+          PRIME_TOKENS_JSON: ${{ secrets.PRIME_TOKENS_JSON }}
+          DEVICE_WVD_BASE64: ${{ secrets.DEVICE_WVD_BASE64 }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            if (!process.env.PRIME_TOKENS_JSON || !process.env.DEVICE_WVD_BASE64) {
+              console.error('ERROR: Secret PRIME_TOKENS_JSON atau DEVICE_WVD_BASE64 belum diisi!');
+              process.exit(1);
+            }
+            fs.writeFileSync('prime_tokens.json', process.env.PRIME_TOKENS_JSON.trim());
+            fs.writeFileSync('device.wvd', Buffer.from(process.env.DEVICE_WVD_BASE64.trim(), 'base64'));
+            console.log('Credentials berhasil dipulihkan.');
+          "
+
+      # 6. Kosongkan cache jika force_refresh aktif
+      - name: Kosongkan cache key (Opsional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force_refresh }}
+        working-directory: generator
+        run: printf '{}\n' > prime_key_cache.json
+
+      # 7. Generate playlist Sports
+      - name: Generate playlist (Sports)
+        working-directory: generator
+        run: |
+          rm -f prime_playlist.m3u
+          npm run generate:sports
+
+      # 8. Validasi playlist
+      - name: Validasi playlist
+        working-directory: generator
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const file = 'prime_playlist.m3u';
+          if (!fs.existsSync(file)) throw new Error('prime_playlist.m3u tidak dibuat');
+          const playlist = fs.readFileSync(file, 'utf8');
+          if (!playlist.startsWith('#EXTM3U')) throw new Error('Header M3U tidak valid');
+          const channels = (playlist.match(/^#EXTINF:/gm) || []).length;
+          if (channels < 1) throw new Error('Playlist kosong');
+          console.log(`Playlist valid: ${channels} entri.`);
+          NODE
+
+      # 9. Simpan cache key kembali ke repo private
+      - name: Simpan cache ke repo private
+        working-directory: generator
+        env:
+          PRIME_ENTITY_SCOPE: sports
+          PRIME_FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_refresh }}
+        run: |
+          set -euo pipefail
+          git config user.name "TV-Harvester-Bot"
+          git config user.email "bot@github.actions"
+
+          state_dir="${RUNNER_TEMP}/prime-state-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "${state_dir}"
+          cp prime_key_cache.json "${state_dir}/prime_key_cache.generated.json"
+          cp prime_entities.json "${state_dir}/prime_entities.generated.json"
+
+          for attempt in 1 2 3; do
+            git fetch --no-tags origin main
+            git reset --hard origin/main
+
+            node .github/scripts/merge_prime_state.js \
+              "${state_dir}/prime_key_cache.generated.json" \
+              "${state_dir}/prime_entities.generated.json" \
+              "${PRIME_ENTITY_SCOPE}" \
+              "${PRIME_FORCE_REFRESH}"
+
+            git add -- prime_key_cache.json prime_entities.json
+            if git diff --staged --quiet; then
+              echo "Cache tidak berubah."
+              exit 0
+            fi
+
+            git commit -m "Update Prime ${PRIME_ENTITY_SCOPE} cache [skip ci]"
+            if git push origin HEAD:main; then
+              echo "Cache berhasil disimpan ke repo private."
+              exit 0
+            fi
+            echo "Branch berubah saat push cache; percobaan ${attempt}/3 diulang..."
+          done
+        continue-on-error: true
+
+      # 10. Publikasikan playlist ke repo publik
+      - name: Publikasikan playlist ke repo publik
+        run: |
+          cp generator/prime_playlist.m3u public-playlist/prime_playlist.m3u
+          cd public-playlist
+          git config user.name "TV-Harvester-Bot"
+          git config user.email "bot@github.actions"
+          git add prime_playlist.m3u
+
+          if git diff --staged --quiet; then
+            echo "Playlist tidak berubah."
+            exit 0
+          fi
+
+          git commit -m "Update Prime playlist (Sports) $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
