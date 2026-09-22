@@ -2,7 +2,7 @@ name: Generate Prime Video Playlist (Sports)
 
 on:
   schedule:
-    - cron: "37 * * * *" 
+    - cron: "*/30 * * * *" 
   workflow_dispatch:
     inputs:
       force_refresh:
