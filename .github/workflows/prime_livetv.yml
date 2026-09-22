@@ -15,6 +15,10 @@ concurrency:
   group: prime-generator-livetv
   cancel-in-progress: false
 
+env:
+  PLAYLIST_REPOSITORY: "wingptpro/edu-playlist"
+  PLAYLIST_BRANCH: "main"
+
 jobs:
   generate:
     runs-on: ubuntu-latest
@@ -23,13 +27,7 @@ jobs:
       contents: write
 
     steps:
-      # 1. Checkout repo publik ini (tempat menyimpan playlist m3u)
-      - name: Checkout Repo Publik
-        uses: actions/checkout@v4
-        with:
-          path: public-playlist
-
-      # 2. Checkout script rahasia dari repo private
+      # 1. Checkout script rahasia dari repo private wingptpro/edu
       - name: Checkout Script dari Repo Private
         uses: actions/checkout@v4
         with:
@@ -37,18 +35,18 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: generator
 
-      # 3. Setup Node.js 20
+      # 2. Setup Node.js 20
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # 4. Install dependencies di folder generator
+      # 3. Install dependencies di folder generator
       - name: Install dependencies
         working-directory: generator
         run: npm install --omit=dev
 
-      # 5. Pulihkan file kredensial dari Secrets ke dalam folder generator
+      # 4. Pulihkan file kredensial dari Secrets ke dalam folder generator
       - name: Restore credentials dari Secrets
         working-directory: generator
         env:
@@ -66,20 +64,20 @@ jobs:
             console.log('Credentials berhasil dipulihkan.');
           "
 
-      # 6. Kosongkan cache jika force_refresh aktif
+      # 5. Kosongkan cache jika force_refresh aktif
       - name: Kosongkan cache key (Opsional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.force_refresh }}
         working-directory: generator
         run: printf '{}\n' > prime_key_cache.json
 
-      # 7. Generate playlist Live TV
+      # 6. Generate playlist Live TV
       - name: Generate playlist (Live TV)
         working-directory: generator
         run: |
           rm -f prime_playlist.m3u
           npm run generate:livetv
 
-      # 8. Validasi playlist
+      # 7. Validasi playlist
       - name: Validasi playlist
         working-directory: generator
         run: |
@@ -94,7 +92,7 @@ jobs:
           console.log(`Playlist valid: ${channels} entri.`);
           NODE
 
-      # 9. Simpan cache key kembali ke repo private
+      # 8. Simpan cache key kembali ke repo private wingptpro/edu
       - name: Simpan cache ke repo private
         working-directory: generator
         env:
@@ -135,11 +133,20 @@ jobs:
           done
         continue-on-error: true
 
-      # 10. Publikasikan playlist ke repo publik
-      - name: Publikasikan playlist ke repo publik
+      # 9. Checkout repo tujuan playlist (wingptpro/edu-playlist)
+      - name: Checkout repo edu-playlist
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PLAYLIST_REPOSITORY }}
+          ref: ${{ env.PLAYLIST_BRANCH }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: destination-playlist
+
+      # 10. Publikasikan playlist ke wingptpro/edu-playlist
+      - name: Publikasikan playlist ke edu-playlist
         run: |
-          cp generator/prime_playlist.m3u public-playlist/prime_playlist.m3u
-          cd public-playlist
+          cp generator/prime_playlist.m3u destination-playlist/prime_playlist.m3u
+          cd destination-playlist
           git config user.name "TV-Harvester-Bot"
           git config user.email "bot@github.actions"
           git add prime_playlist.m3u
